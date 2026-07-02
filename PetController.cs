@@ -14,6 +14,10 @@ namespace CosmeticPetMod
 
         private GameObject? _petVisuals;
         private SpriteRenderer? _spriteRenderer;
+        private AudioSource? _audioSource;
+        private System.Collections.Generic.List<AudioClip> _loadedAudioClips = new System.Collections.Generic.List<AudioClip>();
+        private float _nextAudioTime;
+        private string _loadedAudioPackName = "";
         
         private Vector3 _lastPlayerPos;
         private float _wiggleTimer;
@@ -24,6 +28,11 @@ namespace CosmeticPetMod
         private float _smoothMovementSpeed;
         private float _directionLockTimer;
         private bool _lastPendingFacingRight = true;
+
+        // Sticky-pet stability fields
+        private float _smoothedGroundY;     // Exponentially-damped ground height
+        private bool  _hadGround;           // Whether we had valid ground contact last frame
+        private Vector2 _lastSafePos;       // Most recent position outside all solid geometry
 
         private void Awake()
         {
@@ -43,9 +52,19 @@ namespace CosmeticPetMod
             
             _spriteRenderer = _petVisuals.AddComponent<SpriteRenderer>();
             _spriteRenderer.sortingOrder = 30; // High sorting order to draw in front of background elements
+
+            _audioSource = _petVisuals.AddComponent<AudioSource>();
+            _audioSource.spatialBlend = 1.0f; // 3D sound
+            _audioSource.minDistance = 2f;
+            _audioSource.maxDistance = 25f;
+            _audioSource.rolloffMode = AudioRolloffMode.Logarithmic;
             
             // Try loading the configured pet image on startup
             LoadConfiguredPet();
+
+            // Load the configured audio pack
+            LoadAudioPack();
+            _nextAudioTime = Time.time + UnityEngine.Random.Range(5f, 15f); // Short initial delay
 
             // Find initial player position to prevent teleportation lags
             var player = FindPlayer();
@@ -53,6 +72,8 @@ namespace CosmeticPetMod
             {
                 _lastPlayerPos = player.transform.position;
                 _petVisuals.transform.position = _lastPlayerPos;
+                _lastSafePos = new Vector2(_lastPlayerPos.x, _lastPlayerPos.y);
+                _smoothedGroundY = _lastPlayerPos.y;
             }
         }
 
@@ -75,6 +96,31 @@ namespace CosmeticPetMod
 
             if (!Plugin.Cfg.ModEnabled.Value) return;
 
+            // Handle audio playing
+            if (_loadedAudioClips.Count > 0 && _audioSource != null)
+            {
+                if (Time.time >= _nextAudioTime)
+                {
+                    // Pick a random clip
+                    AudioClip clip = _loadedAudioClips[UnityEngine.Random.Range(0, _loadedAudioClips.Count)];
+                    if (clip != null)
+                    {
+                        // Pass volume directly to PlayOneShot — supports values above 1.0 for amplification
+                        _audioSource.PlayOneShot(clip, Plugin.Cfg.AudioVolume.Value);
+                        Plugin.Logger.LogInfo($"Pet played sound: {clip.name}");
+
+                        // Broadcast audio event to other players in the lobby
+                        int clipIndex = _loadedAudioClips.IndexOf(clip);
+                        MpPetManager.BroadcastAudioEvent(clipIndex, Plugin.Cfg.AudioVolume.Value);
+                    }
+                    // Reset timer
+                    float min = Plugin.Cfg.AudioMinInterval.Value;
+                    float max = Plugin.Cfg.AudioMaxInterval.Value;
+                    if (min > max) min = max; // sanity check
+                    _nextAudioTime = Time.time + UnityEngine.Random.Range(min, max);
+                }
+            }
+
             var player = FindPlayer();
             if (player == null) return;
 
@@ -82,10 +128,22 @@ namespace CosmeticPetMod
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
 
-            // 0. Prevent teleportation lags and mountain clip-throughs
-            if (Vector3.Distance(playerPos, _petVisuals.transform.position) > 15.0f)
+            // 0. Two-tier anti-teleport guard
+            float distToPlayer = Vector3.Distance(playerPos, _petVisuals.transform.position);
+            if (distToPlayer > 18.0f)
             {
+                // Hard snap for extreme distances (load screens, fast-travel)
                 _petVisuals.transform.position = playerPos;
+                _yVelocity = 0f;
+                _hadGround = false;
+                _smoothedGroundY = playerPos.y;
+                _lastSafePos = new Vector2(playerPos.x, playerPos.y);
+            }
+            else if (distToPlayer > 8.0f)
+            {
+                // Soft reset: kill vertical momentum so SmoothDamp doesn't fling the pet across the screen
+                _yVelocity = 0f;
+                _hadGround = false;
             }
 
             // 1. Determine player facing direction with hysteresis to prevent rapid mirroring flutter
@@ -127,80 +185,66 @@ namespace CosmeticPetMod
             float followDist = Plugin.Cfg.FollowDistance.Value;
             float targetX = playerPos.x + (_facingRight ? -followDist : followDist);
             
-            // Smoothly move the horizontal position towards the target
+            // Framerate-independent exponential Lerp — snappy feel without SmoothDamp lag
             float followSpeed = Plugin.Cfg.PetFollowSpeed.Value;
             float currentX = _petVisuals.transform.position.x;
-            float newX = Mathf.Lerp(currentX, targetX, dt * followSpeed);
+            float newX = Mathf.Lerp(currentX, targetX, 1f - Mathf.Exp(-followSpeed * dt));
 
             // 3. Scale-independent horizontal wall collision clamping (three-point check)
             float petScale = Plugin.Cfg.PetScale.Value;
             float halfWidth = 0.4f * petScale;
             float visualHeight = (_spriteRenderer != null && _spriteRenderer.sprite != null) ? 
                 (_spriteRenderer.sprite.rect.height / _spriteRenderer.sprite.pixelsPerUnit) * petScale : 2.4f * petScale;
+            float squishX = 1.0f;
+            float squishY = 1.0f;
+            float newY;
 
-            float dist = Mathf.Abs(newX - currentX);
-            if (dist > 0.001f)
+            if (Plugin.Cfg.SimpleMode.Value)
             {
-                float dirX = Mathf.Sign(newX - currentX);
-                float rayDist = dist + halfWidth;
+                float heightOffset = Plugin.Cfg.PetHeightOffset.Value;
+                float bobbingSpeed = Plugin.Cfg.BobbingSpeed.Value;
+                float bobbingAmplitude = Plugin.Cfg.BobbingAmplitude.Value;
+                float bobbingOffset = Mathf.Sin(Time.time * bobbingSpeed) * bobbingAmplitude;
 
-                // Check at bottom, center, and top heights of the sprite's current squished visual volume
-                float[] checkHeights = new float[] { 
-                    _petVisuals.transform.position.y - (visualHeight * _currentSquishY * 0.35f), 
-                    _petVisuals.transform.position.y, 
-                    _petVisuals.transform.position.y + (visualHeight * _currentSquishY * 0.35f) 
-                };
+                float targetY = playerPos.y + (visualHeight * 0.5f) + heightOffset - 0.4f + bobbingOffset;
+                float currentY = _petVisuals.transform.position.y;
+                newY = Mathf.SmoothDamp(currentY, targetY, ref _yVelocity, 0.12f, 50.0f, dt);
 
-                foreach (float y in checkHeights)
-                {
-                    RaycastHit2D hit = Physics2D.Raycast(new Vector2(currentX, y), new Vector2(dirX, 0f), rayDist);
-                    if (hit.collider != null && !hit.collider.isTrigger)
-                    {
-                        Body hitBody = hit.collider.GetComponentInParent<Body>();
-                        if (hitBody == null)
-                        {
-                            // Clamp newX to stop exactly at the block edge
-                            newX = hit.point.x - dirX * halfWidth;
-                            
-                            // Recalculate remaining distance for subsequent height checks
-                            dist = Mathf.Abs(newX - currentX);
-                            rayDist = dist + halfWidth;
-                        }
-                    }
-                }
+                _currentSquishY = 1.0f;
+                _petVisuals.transform.position = new Vector3(newX, newY, _petVisuals.transform.position.z);
             }
-
-            // 4. Smart Ground detection using Multi-Raycast (Left, Center, Right) on the clamped horizontal coordinate
-            float[] sampleX = new float[] { newX - halfWidth, newX, newX + halfWidth };
-            float highestGroundY = float.MinValue;
-            bool foundGround = false;
-
-            // Track if we found a ceiling above any of our sample points to use for squishing
-            float lowestCeilingY = float.MaxValue;
-            bool foundAnyCeiling = false;
-
-            foreach (float x in sampleX)
+            else
             {
-                // First, find if there is a ceiling above this sample point
-                float ceilingY = float.MaxValue;
-                bool foundCeiling = false;
-                RaycastHit2D[] ceilHits = Physics2D.RaycastAll(new Vector2(x, playerPos.y + 0.8f), Vector2.up, 5.0f);
-                foreach (var hit in ceilHits)
+                // 3.5 PRE-PASS: Ceiling scan across all three X sample columns BEFORE wall-check and ground scan.
+                // Firing from a stable mid-air origin gives lookahead so squish starts before the pet clips the tile.
+                float[] sampleX = new float[] { newX - halfWidth, newX, newX + halfWidth };
+                float lowestCeilingY = float.MaxValue;
+                bool foundAnyCeiling = false;
+                float[] perColumnCeilingY = new float[] { float.MaxValue, float.MaxValue, float.MaxValue };
+
+                for (int ci = 0; ci < sampleX.Length; ci++)
                 {
-                    if (hit.collider != null && !hit.collider.isTrigger)
+                    float x = sampleX[ci];
+                    float scanOriginY = playerPos.y + 1.0f; // Stable mid-air origin, always in open space
+                    RaycastHit2D[] ceilHits = Physics2D.RaycastAll(new Vector2(x, scanOriginY), Vector2.up, 8.0f);
+                    foreach (var hit in ceilHits)
                     {
-                        Body hitBody = hit.collider.GetComponentInParent<Body>();
-                        if (hitBody == null)
+                        if (hit.collider != null && !hit.collider.isTrigger)
                         {
-                            float hitY = hit.point.y;
-                            if (hitY >= playerPos.y + 1.0f)
+                            Body hitBody = hit.collider.GetComponentInParent<Body>();
+                            Item hitItem = hit.collider.GetComponentInParent<Item>();
+                            if (hitBody == null && hitItem == null)
                             {
-                                ceilingY = hitY;
-                                foundCeiling = true;
-                                if (ceilingY < lowestCeilingY)
+                                float hitY = hit.point.y;
+                                // Only count ceilings meaningfully above current ground to avoid false floors
+                                if (hitY > _smoothedGroundY + 0.3f)
                                 {
-                                    lowestCeilingY = ceilingY;
-                                    foundAnyCeiling = true;
+                                    perColumnCeilingY[ci] = hitY;
+                                    if (hitY < lowestCeilingY)
+                                    {
+                                        lowestCeilingY = hitY;
+                                        foundAnyCeiling = true;
+                                    }
                                 }
                                 break;
                             }
@@ -208,201 +252,241 @@ namespace CosmeticPetMod
                     }
                 }
 
-                // Next, find the ground below this sample point
-                Vector2 rayOrigin = new Vector2(x, playerPos.y + 1.2f);
-                RaycastHit2D[] hits = Physics2D.RaycastAll(rayOrigin, Vector2.down, 15.0f);
-                foreach (var hit in hits)
+                // 3.6 Horizontal wall collision — ceiling-aware top height clamping so we don't get blocked by low roofs
+                float dist = Mathf.Abs(newX - currentX);
+                if (dist > 0.001f)
                 {
-                    if (hit.collider != null && !hit.collider.isTrigger)
+                    float dirX = Mathf.Sign(newX - currentX);
+                    float rayDist = dist + halfWidth;
+
+                    float petCenterY   = _petVisuals.transform.position.y;
+                    float squishedHalf = visualHeight * _currentSquishY * 0.5f;
+                    float topCheck     = petCenterY + squishedHalf * 0.7f;
+                    float bottomCheck  = petCenterY - squishedHalf * 0.7f;
+
+                    // Clamp the top check-height so we never ray into a ceiling tile we can squish under
+                    if (foundAnyCeiling)
+                        topCheck = Mathf.Min(topCheck, lowestCeilingY - 0.05f);
+
+                    float[] checkHeights = new float[] { bottomCheck, petCenterY, topCheck };
+
+                    foreach (float y in checkHeights)
                     {
-                        Body hitBody = hit.collider.GetComponentInParent<Body>();
-                        if (hitBody == null)
+                        RaycastHit2D hit = Physics2D.Raycast(new Vector2(currentX, y), new Vector2(dirX, 0f), rayDist);
+                        if (hit.collider != null && !hit.collider.isTrigger)
                         {
-                            float hitY = hit.point.y;
-
-                            // If there is a ceiling above this sample point, ignore ground hits at or above it
-                            if (foundCeiling && hitY >= ceilingY - 0.1f) continue;
-
-                            // Dynamic Platform Matching for pass-through/one-way platforms
-                            bool isPassThrough = hit.collider.GetComponent<PlatformEffector2D>() != null || 
-                                                 hit.collider.name.IndexOf("platform", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                 hit.collider.name.IndexOf("oneway", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                 hit.collider.name.IndexOf("passthrough", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                 hit.collider.name.IndexOf("jumpthrough", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                 hit.collider.name.IndexOf("bridge", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                            if (isPassThrough)
+                            Body hitBody = hit.collider.GetComponentInParent<Body>();
+                            Item hitItem = hit.collider.GetComponentInParent<Item>();
+                            if (hitBody == null && hitItem == null)
                             {
-                                float verticalDiff = playerPos.y - hitY;
-                                if (verticalDiff < -0.2f || verticalDiff > 0.5f)
-                                {
-                                    continue; // Ignore this platform as the player is not standing on or close to it
-                                }
-                            }
-
-                            if (hitY > highestGroundY)
-                            {
-                                highestGroundY = hitY;
-                                foundGround = true;
+                                newX = hit.point.x - dirX * halfWidth;
+                                dist = Mathf.Abs(newX - currentX);
+                                rayDist = dist + halfWidth;
                             }
                         }
                     }
                 }
-            }
 
-            // 4. Height clamping with Airborne Coyote Hover & Ceiling Squeezing
-            float targetY;
-            float heightOffset = Plugin.Cfg.PetHeightOffset.Value;
-            float maxGroundDist = Plugin.Cfg.MaxGroundDistance.Value;
+                // 4. Smart Ground detection using Multi-Raycast (Left, Center, Right) on the clamped horizontal coordinate
+                float highestGroundY = float.MinValue;
+                bool foundGround = false;
 
-            bool isAirborne = !foundGround || (playerPos.y - highestGroundY > maxGroundDist);
-
-            if (isAirborne)
-            {
-                // Smart Airborne Coyote Hover: float relative to player's feet/hips + gentle sine-wave bobbing
-                float bobbingSpeed = Plugin.Cfg.BobbingSpeed.Value;
-                float bobbingAmplitude = Plugin.Cfg.BobbingAmplitude.Value;
-                float bobbingOffset = Mathf.Sin(Time.time * bobbingSpeed) * bobbingAmplitude;
-                targetY = playerPos.y + (visualHeight * 0.5f) + heightOffset - 0.4f + bobbingOffset;
-            }
-            else
-            {
-                // Ground tracking mode: scale-independent center positioning so bottom rests exactly on the ground!
-                targetY = highestGroundY + (visualHeight * 0.5f) + heightOffset;
-            }
-
-            // Smart Ceiling Detection & Squeezing
-            float squishX = 1.0f;
-            float squishY = 1.0f;
-
-            float targetSquishY = 1.0f;
-            if (foundAnyCeiling)
-            {
-                float groundY = foundGround ? highestGroundY : (playerPos.y - 0.4f);
-                float clearance = lowestCeilingY - groundY;
-                if (clearance < visualHeight)
+                for (int gi = 0; gi < sampleX.Length; gi++)
                 {
-                    // Calculate visual squeezing factor based on available space
-                    targetSquishY = Mathf.Clamp(clearance / visualHeight, 0.4f, 1.0f);
-                }
-            }
+                    float x = sampleX[gi];
+                    float colCeilY = perColumnCeilingY[gi]; // Use pre-pass ceiling result for this column
 
-            // Smooth Interpolation of the squish factor over time
-            _currentSquishY = Mathf.Lerp(_currentSquishY, targetSquishY, dt * Plugin.Cfg.SquishSmoothing.Value);
-            squishY = _currentSquishY;
-            squishX = 1.0f / squishY; // Maintain volume
-
-            // Adjust Y height center using the interpolated squish factor so the bottom continues resting on the ground
-            if (!isAirborne)
-            {
-                targetY = highestGroundY + (visualHeight * squishY * 0.5f) + heightOffset;
-            }
-            else
-            {
-                float bobbingSpeed = Plugin.Cfg.BobbingSpeed.Value;
-                float bobbingAmplitude = Plugin.Cfg.BobbingAmplitude.Value;
-                float bobbingOffset = Mathf.Sin(Time.time * bobbingSpeed) * bobbingAmplitude;
-                targetY = playerPos.y + (visualHeight * squishY * 0.5f) + heightOffset - 0.4f + bobbingOffset;
-            }
-
-            // Clamping targetY to the physical clearance bounds to prevent SmoothDamp spring compression inside tiles
-            if (foundAnyCeiling)
-            {
-                float maxAllowedY = lowestCeilingY - (visualHeight * squishY * 0.5f);
-                if (targetY > maxAllowedY)
-                {
-                    targetY = maxAllowedY;
-                }
-            }
-            if (foundGround)
-            {
-                float minAllowedY = highestGroundY + (visualHeight * squishY * 0.5f);
-                if (targetY < minAllowedY)
-                {
-                    targetY = minAllowedY;
-                }
-            }
-
-            // Smoothly interpolate vertical position using SmoothDamp (Spring-Damper suspension)
-            float currentY = _petVisuals.transform.position.y;
-            float newY = Mathf.SmoothDamp(currentY, targetY, ref _yVelocity, 0.12f, 50.0f, dt);
-
-            // 4.5 Robust Post-Movement Collision Resolution
-            Vector2 finalPos = new Vector2(newX, newY);
-            Vector2 previousPos = new Vector2(currentX, currentY);
-            float halfWidthResolved = halfWidth;
-            float halfHeightResolved = visualHeight * squishY * 0.5f;
-
-            // Run a few resolution iterations to handle multiple overlapping surfaces (e.g. corner junctions)
-            for (int i = 0; i < 3; i++)
-            {
-                // Find any overlapping solid collider at finalPos
-                Collider2D? overlappingCol = null;
-                Collider2D[] overlaps = Physics2D.OverlapBoxAll(finalPos, new Vector2(halfWidthResolved * 2f, halfHeightResolved * 2f), 0f);
-                foreach (var col in overlaps)
-                {
-                    if (col != null && !col.isTrigger)
-                    {
-                        Body hitBody = col.GetComponentInParent<Body>();
-                        if (hitBody == null)
-                        {
-                            overlappingCol = col;
-                            break; // Resolve one collider at a time
-                        }
-                    }
-                }
-
-                if (overlappingCol == null)
-                {
-                    break; // No overlapping colliders, we are safe!
-                }
-
-                // We are overlapping a solid block! Let's find the penetration point and normal.
-                // Try raycasting from the previous safe position to finalPos
-                Vector2 rayDir = finalPos - previousPos;
-                float rayLen = rayDir.magnitude;
-                bool resolved = false;
-
-                if (rayLen > 0.001f)
-                {
-                    RaycastHit2D[] hits = Physics2D.RaycastAll(previousPos, rayDir.normalized, rayLen + 1.0f);
+                    // Find the ground below this sample point
+                    // Anchor to the pet's own bottom edge so it scans its actual footprint (not the player's)
+                    float petBottomY = _petVisuals.transform.position.y - (visualHeight * _currentSquishY * 0.5f) + 0.1f;
+                    Vector2 rayOrigin = new Vector2(x, petBottomY + 1.0f);
+                    RaycastHit2D[] hits = Physics2D.RaycastAll(rayOrigin, Vector2.down, 15.0f);
                     foreach (var hit in hits)
                     {
-                        if (hit.collider == overlappingCol)
+                        if (hit.collider != null && !hit.collider.isTrigger)
                         {
-                            // Found the exact boundary entry point!
-                            // Offset along the normal to keep the bounding box outside
-                            Vector2 normal = hit.normal;
-                            
-                            if (Mathf.Abs(normal.x) > 0.1f)
+                            Body hitBody = hit.collider.GetComponentInParent<Body>();
+                            Item hitItem = hit.collider.GetComponentInParent<Item>();
+                            if (hitBody == null && hitItem == null)
                             {
-                                finalPos.x = hit.point.x + normal.x * halfWidthResolved;
+                                float hitY = hit.point.y;
+
+                                // Ignore ground hits at or above the ceiling for this column
+                                if (colCeilY < float.MaxValue && hitY >= colCeilY - 0.1f) continue;
+
+                                // Dynamic Platform Matching for pass-through/one-way platforms
+                                bool isPassThrough = hit.collider.GetComponent<PlatformEffector2D>() != null || 
+                                                     hit.collider.name.IndexOf("platform", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                     hit.collider.name.IndexOf("oneway", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                     hit.collider.name.IndexOf("passthrough", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                     hit.collider.name.IndexOf("jumpthrough", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                     hit.collider.name.IndexOf("bridge", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                                if (isPassThrough)
+                                {
+                                    float verticalDiff = playerPos.y - hitY;
+                                    if (verticalDiff < -0.2f || verticalDiff > 0.5f)
+                                    {
+                                        continue; // Ignore this platform as the player is not standing on or close to it
+                                    }
+                                }
+
+                                if (hitY > highestGroundY)
+                                {
+                                    highestGroundY = hitY;
+                                    foundGround = true;
+                                }
                             }
-                            if (Mathf.Abs(normal.y) > 0.1f)
-                            {
-                                finalPos.y = hit.point.y + normal.y * halfHeightResolved;
-                                _yVelocity = 0f; // Stop vertical velocity if we hit floor/ceiling to prevent jitter/sticking
-                            }
-                            resolved = true;
-                            break;
                         }
                     }
                 }
 
-                if (!resolved)
+                // 4b. Height clamping with Airborne Coyote Hover & Ceiling Squeezing
+                float targetY;
+                float heightOffset = Plugin.Cfg.PetHeightOffset.Value;
+                float maxGroundDist = Plugin.Cfg.MaxGroundDistance.Value;
+
+                // Ground Y filter: only rate-limit LARGE jumps (tile edges), pass small variations through instantly
+                const float GROUND_JUMP_THRESHOLD = 0.35f;
+                const float GROUND_TRACK_SPEED    = 4.0f;
+                if (foundGround)
                 {
-                    // Fallback 1: Raycast from playerPos (which is guaranteed to be in empty space) to finalPos
-                    Vector2 playerPos2D = new Vector2(playerPos.x, playerPos.y);
-                    Vector2 playerToFinal = finalPos - playerPos2D;
-                    float playerDist = playerToFinal.magnitude;
-                    if (playerDist > 0.001f)
+                    if (!_hadGround)
                     {
-                        RaycastHit2D[] hits = Physics2D.RaycastAll(playerPos2D, playerToFinal.normalized, playerDist + 1.0f);
+                        _smoothedGroundY = highestGroundY; // First contact: snap immediately
+                        _hadGround = true;
+                    }
+                    else
+                    {
+                        float delta = highestGroundY - _smoothedGroundY;
+                        if (Mathf.Abs(delta) <= GROUND_JUMP_THRESHOLD)
+                            _smoothedGroundY = highestGroundY; // Flat/micro change: track exactly
+                        else
+                            _smoothedGroundY += Mathf.Clamp(delta, -GROUND_TRACK_SPEED * dt, GROUND_TRACK_SPEED * dt);
+                    }
+                }
+                else
+                {
+                    _hadGround = false;
+                }
+
+                bool isAirborne = !foundGround || (playerPos.y - _smoothedGroundY > maxGroundDist);
+
+                if (isAirborne)
+                {
+                    // Smart Airborne Coyote Hover: float relative to player's feet/hips + gentle sine-wave bobbing
+                    float bobbingSpeed = Plugin.Cfg.BobbingSpeed.Value;
+                    float bobbingAmplitude = Plugin.Cfg.BobbingAmplitude.Value;
+                    float bobbingOffset = Mathf.Sin(Time.time * bobbingSpeed) * bobbingAmplitude;
+                    targetY = playerPos.y + (visualHeight * 0.5f) + heightOffset - 0.4f + bobbingOffset;
+                }
+                else
+                {
+                    // Ground tracking mode: use smoothed ground Y so tile-edge pops don't lurch the pet
+                    targetY = _smoothedGroundY + (visualHeight * 0.5f) + heightOffset;
+                }
+
+                // Smart Ceiling Squeezing — measure clearance from the pet's own bottom edge, not the player's feet
+                const float MIN_SQUISH = 0.15f; // Pet never flattens below 15% — still recognisable
+                float targetSquishY = 1.0f;
+                if (foundAnyCeiling)
+                {
+                    float petActualBottom = foundGround ? _smoothedGroundY : (targetY - visualHeight * 0.5f);
+                    float clearance = lowestCeilingY - petActualBottom;
+                    if (clearance < visualHeight)
+                    {
+                        // Allow squish all the way down to MIN_SQUISH — no artificial 0.4 floor
+                        targetSquishY = Mathf.Clamp(clearance / visualHeight, MIN_SQUISH, 1.0f);
+                    }
+                }
+
+                // Asymmetric smoothing: compress fast when entering a gap, expand normally when leaving
+                float squishRate = targetSquishY < _currentSquishY
+                    ? Plugin.Cfg.SquishSmoothing.Value * 2.5f  // Fast compress into tight space
+                    : Plugin.Cfg.SquishSmoothing.Value;         // Normal expand when leaving
+                _currentSquishY = Mathf.Lerp(_currentSquishY, targetSquishY, dt * squishRate);
+                squishY = _currentSquishY;
+                squishX = 1.0f / squishY; // Maintain volume
+
+                // Adjust Y height center using the interpolated squish factor so the bottom continues resting on the ground
+                if (!isAirborne)
+                {
+                    targetY = _smoothedGroundY + (visualHeight * squishY * 0.5f) + heightOffset;
+                }
+                else
+                {
+                    float bobbingSpeed = Plugin.Cfg.BobbingSpeed.Value;
+                    float bobbingAmplitude = Plugin.Cfg.BobbingAmplitude.Value;
+                    float bobbingOffset = Mathf.Sin(Time.time * bobbingSpeed) * bobbingAmplitude;
+                    targetY = playerPos.y + (visualHeight * squishY * 0.5f) + heightOffset - 0.4f + bobbingOffset;
+                }
+
+                // Clamping targetY to the physical clearance bounds to prevent SmoothDamp spring compression inside tiles
+                if (foundAnyCeiling)
+                {
+                    float maxAllowedY = lowestCeilingY - (visualHeight * squishY * 0.5f);
+                    if (targetY > maxAllowedY)
+                        targetY = maxAllowedY;
+                }
+                if (foundGround)
+                {
+                    float minAllowedY = _smoothedGroundY + (visualHeight * squishY * 0.5f);
+                    if (targetY < minAllowedY)
+                        targetY = minAllowedY;
+                }
+
+                // Smoothly interpolate vertical position using SmoothDamp (Spring-Damper suspension)
+                float currentY = _petVisuals.transform.position.y;
+                newY = Mathf.SmoothDamp(currentY, targetY, ref _yVelocity, 0.12f, 50.0f, dt);
+
+                // 4.5 Robust Post-Movement Collision Resolution
+                Vector2 finalPos = new Vector2(newX, newY);
+                Vector2 previousPos = new Vector2(currentX, currentY);
+                float halfWidthResolved = halfWidth;
+                float halfHeightResolved = visualHeight * squishY * 0.5f;
+
+                // Run a few resolution iterations to handle multiple overlapping surfaces (e.g. corner junctions)
+                for (int i = 0; i < 3; i++)
+                {
+                    // Find any overlapping solid collider at finalPos
+                    Collider2D? overlappingCol = null;
+                    Collider2D[] overlaps = Physics2D.OverlapBoxAll(finalPos, new Vector2(halfWidthResolved * 2f, halfHeightResolved * 2f), 0f);
+                    foreach (var col in overlaps)
+                    {
+                        if (col != null && !col.isTrigger)
+                        {
+                            Body hitBody = col.GetComponentInParent<Body>();
+                            Item hitItem = col.GetComponentInParent<Item>();
+                            if (hitBody == null && hitItem == null)
+                            {
+                                overlappingCol = col;
+                                break; // Resolve one collider at a time
+                            }
+                        }
+                    }
+
+                    if (overlappingCol == null)
+                    {
+                        break; // No overlapping colliders, we are safe!
+                    }
+
+                    // We are overlapping a solid block! Let's find the penetration point and normal.
+                    // Try raycasting from the previous safe position to finalPos
+                    Vector2 rayDir = finalPos - previousPos;
+                    float rayLen = rayDir.magnitude;
+                    bool resolved = false;
+
+                    if (rayLen > 0.001f)
+                    {
+                        RaycastHit2D[] hits = Physics2D.RaycastAll(previousPos, rayDir.normalized, rayLen + 1.0f);
                         foreach (var hit in hits)
                         {
                             if (hit.collider == overlappingCol)
                             {
+                                // Found the exact boundary entry point!
+                                // Offset along the normal to keep the bounding box outside
                                 Vector2 normal = hit.normal;
+                                
                                 if (Mathf.Abs(normal.x) > 0.1f)
                                 {
                                     finalPos.x = hit.point.x + normal.x * halfWidthResolved;
@@ -410,42 +494,95 @@ namespace CosmeticPetMod
                                 if (Mathf.Abs(normal.y) > 0.1f)
                                 {
                                     finalPos.y = hit.point.y + normal.y * halfHeightResolved;
-                                    _yVelocity = 0f;
+                                    _yVelocity = 0f; // Stop vertical velocity if we hit floor/ceiling to prevent jitter/sticking
                                 }
                                 resolved = true;
                                 break;
                             }
                         }
                     }
+
+                    if (!resolved)
+                    {
+                        // Fallback 1: Raycast from playerPos (which is guaranteed to be in empty space) to finalPos
+                        Vector2 playerPos2D = new Vector2(playerPos.x, playerPos.y);
+                        Vector2 playerToFinal = finalPos - playerPos2D;
+                        float playerDist = playerToFinal.magnitude;
+                        if (playerDist > 0.001f)
+                        {
+                            RaycastHit2D[] hits = Physics2D.RaycastAll(playerPos2D, playerToFinal.normalized, playerDist + 1.0f);
+                            foreach (var hit in hits)
+                            {
+                                if (hit.collider == overlappingCol)
+                                {
+                                    Vector2 normal = hit.normal;
+                                    if (Mathf.Abs(normal.x) > 0.1f)
+                                    {
+                                        finalPos.x = hit.point.x + normal.x * halfWidthResolved;
+                                    }
+                                    if (Mathf.Abs(normal.y) > 0.1f)
+                                    {
+                                        finalPos.y = hit.point.y + normal.y * halfHeightResolved;
+                                        _yVelocity = 0f;
+                                    }
+                                    resolved = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!resolved)
+                    {
+                        // Fallback 2: Simple geometric push-out using the closest point on the collider
+                        Vector2 closest = overlappingCol.ClosestPoint(finalPos);
+                        Vector2 pushDir = finalPos - closest;
+                        if (pushDir.magnitude > 0.001f)
+                        {
+                            pushDir.Normalize();
+                            finalPos.x = closest.x + pushDir.x * halfWidthResolved;
+                            finalPos.y = closest.y + pushDir.y * halfHeightResolved;
+                            _yVelocity = 0f;
+                        }
+                        else
+                        {
+                            // Fallback 3: Extreme backup - push straight up out of the block
+                            finalPos.y += 0.1f;
+                            _yVelocity = 0f;
+                        }
+                    }
                 }
 
-                if (!resolved)
+                // --- Change B: Last-safe-position guardian ---
+                // After all resolution attempts, if we are still overlapping solid geometry, fall back to last known safe position.
+                bool stillOverlapping = false;
+                Collider2D[] finalOverlaps = Physics2D.OverlapBoxAll(finalPos, new Vector2(halfWidthResolved * 1.8f, halfHeightResolved * 1.8f), 0f);
+                foreach (var col in finalOverlaps)
                 {
-                    // Fallback 2: Simple geometric push-out using the closest point on the collider
-                    Vector2 closest = overlappingCol.ClosestPoint(finalPos);
-                    Vector2 pushDir = finalPos - closest;
-                    if (pushDir.magnitude > 0.001f)
+                    if (col != null && !col.isTrigger)
                     {
-                        pushDir.Normalize();
-                        finalPos.x = closest.x + pushDir.x * halfWidthResolved;
-                        finalPos.y = closest.y + pushDir.y * halfHeightResolved;
-                        _yVelocity = 0f;
-                    }
-                    else
-                    {
-                        // Fallback 3: Extreme backup - push straight up out of the block
-                        finalPos.y += 0.1f;
-                        _yVelocity = 0f;
+                        Body chkBody = col.GetComponentInParent<Body>();
+                        Item chkItem = col.GetComponentInParent<Item>();
+                        if (chkBody == null && chkItem == null)
+                        {
+                            stillOverlapping = true;
+                            break;
+                        }
                     }
                 }
+
+                if (!stillOverlapping)
+                    _lastSafePos = finalPos; // Record good position for future fallback
+                else
+                    finalPos = _lastSafePos; // Snap back to last known safe location
+
+                // Assign the resolved, completely safe coordinates
+                newX = finalPos.x;
+                newY = finalPos.y;
+
+                // Set final position
+                _petVisuals.transform.position = new Vector3(newX, newY, _petVisuals.transform.position.z);
             }
-
-            // Assign the resolved, completely safe coordinates
-            newX = finalPos.x;
-            newY = finalPos.y;
-
-            // Set final position
-            _petVisuals.transform.position = new Vector3(newX, newY, _petVisuals.transform.position.z);
 
             // 5. Walking wiggle animation (with low-pass motion speed filtering and deadzone)
             float playerMovementSpeed = Vector3.Distance(playerPos, _lastPlayerPos) / dt;
@@ -667,6 +804,86 @@ namespace CosmeticPetMod
                 }
             }
             callback?.Invoke(false);
+        }
+
+        public void LoadAudioPack()
+        {
+            string packName = Plugin.Cfg.SelectedAudioPack.Value;
+            if (string.IsNullOrEmpty(packName) || packName.Equals("None", StringComparison.OrdinalIgnoreCase))
+            {
+                _loadedAudioClips.Clear();
+                _loadedAudioPackName = "None";
+                Plugin.Logger.LogInfo("Cleared loaded audio clips (Selected pack is None).");
+                return;
+            }
+
+            if (_loadedAudioPackName == packName)
+            {
+                return; // Already loaded!
+            }
+
+            string packPath = Path.Combine(Plugin.AudioPacksDirectory, packName);
+            if (!Directory.Exists(packPath))
+            {
+                Plugin.Logger.LogWarning($"Audio pack directory not found at: {packPath}");
+                _loadedAudioClips.Clear();
+                _loadedAudioPackName = "None";
+                return;
+            }
+
+            _loadedAudioClips.Clear();
+            _loadedAudioPackName = packName;
+            Plugin.Logger.LogInfo($"Loading audio pack: {packName} from {packPath}");
+
+            // Load .wav, .ogg, .mp3 files
+            string[] audioFiles = Directory.GetFiles(packPath, "*.*", SearchOption.AllDirectories);
+            foreach (string file in audioFiles)
+            {
+                string ext = Path.GetExtension(file).ToLower();
+                AudioType type;
+                if (ext == ".wav")
+                {
+                    type = AudioType.WAV;
+                }
+                else if (ext == ".ogg")
+                {
+                    type = AudioType.OGGVORBIS;
+                }
+                else if (ext == ".mp3")
+                {
+                    type = AudioType.MPEG;
+                }
+                else
+                {
+                    continue; // Skip unsupported formats
+                }
+
+                StartCoroutine(LoadAudioClipCoroutine(file, type));
+            }
+        }
+
+        private IEnumerator LoadAudioClipCoroutine(string filePath, AudioType type)
+        {
+            string url = "file:///" + filePath.Replace("\\", "/");
+            using (var uwr = UnityWebRequestMultimedia.GetAudioClip(url, type))
+            {
+                yield return uwr.SendWebRequest();
+
+                if (uwr.result == UnityWebRequest.Result.Success)
+                {
+                    AudioClip clip = DownloadHandlerAudioClip.GetContent(uwr);
+                    if (clip != null)
+                    {
+                        clip.name = Path.GetFileName(filePath);
+                        _loadedAudioClips.Add(clip);
+                        Plugin.Logger.LogInfo($"Successfully loaded audio clip: {clip.name}");
+                    }
+                }
+                else
+                {
+                    Plugin.Logger.LogError($"Failed to load audio clip from {url}: {uwr.error}");
+                }
+            }
         }
     }
 }

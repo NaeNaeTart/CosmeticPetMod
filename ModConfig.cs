@@ -6,6 +6,7 @@ namespace CosmeticPetMod
     public class ModConfig
     {
         public ConfigEntry<bool> ModEnabled { get; }
+        public ConfigEntry<bool> SimpleMode { get; }
         public ConfigEntry<KeyCode> TogglePetKey { get; }
         public ConfigEntry<KeyCode> ToggleMenuKey { get; }
         public ConfigEntry<string> SelectedPetImage { get; }
@@ -19,10 +20,15 @@ namespace CosmeticPetMod
         public ConfigEntry<float> BobbingAmplitude { get; }
         public ConfigEntry<float> BobbingSpeed { get; }
         public ConfigEntry<float> SquishSmoothing { get; }
+        public ConfigEntry<string> SelectedAudioPack { get; }
+        public ConfigEntry<float> AudioMinInterval { get; }
+        public ConfigEntry<float> AudioMaxInterval { get; }
+        public ConfigEntry<float> AudioVolume { get; }
 
         public ModConfig(ConfigFile config)
         {
             ModEnabled = config.Bind("General", "ModEnabled", true, "Enable or disable the cosmetic pet mod.");
+            SimpleMode = config.Bind("General", "SimpleMode", false, "If enabled, the pet ignores all geometry/collision checks and hovers/wiggles directly next to the player.");
             TogglePetKey = config.Bind("General", "TogglePetKey", KeyCode.P, "The keybind to toggle the pet visibility on or off.");
             ToggleMenuKey = config.Bind("General", "ToggleMenuKey", KeyCode.O, "The keybind to open the cosmetic pet settings menu.");
             SelectedPetImage = config.Bind("General", "SelectedPetImage", "default_slime.png", "The filename of the currently selected pet image from the Pets folder.");
@@ -39,6 +45,11 @@ namespace CosmeticPetMod
             PetHeightOffset = config.Bind("Physics", "PetHeightOffset", 0.4f, "The height offset of the pet above the ground.");
             MaxGroundDistance = config.Bind("Physics", "MaxGroundDistance", 8.0f, "The maximum vertical distance below the player that the pet will try to stick to the ground. If the ground is further than this, the pet will hover smoothly below the player.");
             SquishSmoothing = config.Bind("Physics", "SquishSmoothing", 6.0f, "How smoothly the ceiling squeezing factor interpolates when moving under different heights.");
+
+            SelectedAudioPack = config.Bind("Audio", "SelectedAudioPack", "default_slime", "The folder name of the currently selected pet audio-pack from the AudioPacks folder.");
+            AudioMinInterval = config.Bind("Audio", "AudioMinInterval", 15.0f, "Minimum duration in seconds between random pet audio/voice triggers.");
+            AudioMaxInterval = config.Bind("Audio", "AudioMaxInterval", 45.0f, "Maximum duration in seconds between random pet audio/voice triggers.");
+            AudioVolume = config.Bind("Audio", "AudioVolume", 0.8f, "Volume level of the pet's audio triggers.");
         }
     }
 }

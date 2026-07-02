@@ -5,6 +5,6 @@ namespace CosmeticPetMod
     {
         public const string GUID    = "cosmeticpetmod.casualtiesunknown.mod";
         public const string NAME    = "Cosmetic Pet Mod";
-        public const string VERSION = "1.0.0";
+        public const string VERSION = "1.1.0";
     }
 }

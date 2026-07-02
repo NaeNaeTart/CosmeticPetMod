@@ -12,7 +12,6 @@ namespace CosmeticPetMod
     [BepInPlugin(PluginInfo.GUID, PluginInfo.NAME, PluginInfo.VERSION)]
     [BepInProcess("CasualtiesUnknown.exe")]
     [BepInDependency("com.kanisuko.scavlib")] // Depend on ScavLib!
-    [BepInDependency("com.kanisuko.scavsetlib", BepInDependency.DependencyFlags.SoftDependency)] // Soft depend on ScavSetLib
     [BepInDependency("me.danimineiro.modsettings", BepInDependency.DependencyFlags.SoftDependency)] // Soft depend on ModSettingsLib
     public class Plugin : BaseUnityPlugin
     {
@@ -22,19 +21,17 @@ namespace CosmeticPetMod
 
         internal static ModConfig Cfg { get; private set; } = null!;
         public static string PetsDirectory { get; private set; } = "";
+        public static string AudioPacksDirectory { get; private set; } = "";
 
         private void Awake()
         {
             Instance = this;
             Logger = base.Logger;
 
-            // 1. Determine Pets directory
+            // 1. Determine Pets and AudioPacks directories (do NOT auto-create them)
             string modDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Paths.PluginPath;
             PetsDirectory = Path.Combine(modDir, "CosmeticPetMod", "Pets");
-            if (!Directory.Exists(PetsDirectory))
-            {
-                Directory.CreateDirectory(PetsDirectory);
-            }
+            AudioPacksDirectory = Path.Combine(modDir, "CosmeticPetMod", "AudioPacks");
 
             // 2. Initialize Configuration
             Cfg = new ModConfig(Config);
@@ -59,17 +56,6 @@ namespace CosmeticPetMod
                 catch (System.Exception ex)
                 {
                     Logger.LogWarning($"Failed to register native Mod Settings page or apply compatibility patches: {ex}");
-                }
-            }
-            else
-            {
-                try
-                {
-                    RegisterScavSetLibSettings();
-                }
-                catch (System.Exception ex)
-                {
-                    Logger.LogWarning($"ScavSetLib is not active or failed to load settings: {ex.Message}");
                 }
             }
 
@@ -105,22 +91,6 @@ namespace CosmeticPetMod
             Logger.LogInfo($"[{PluginInfo.NAME} v{PluginInfo.VERSION}] Loaded successfully!");
         }
 
-        private void RegisterScavSetLibSettings()
-        {
-            // Register Pet Toggle in Native Settings Video Category as a custom setting
-            ScavSetLib.SettingsManager.RegisterBool(
-                "Enable Cosmetic Pet",
-                Setting.SettingCategory.Video,
-                Cfg.ModEnabled.Value,
-                (val) => {
-                    Cfg.ModEnabled.Value = val;
-                    Logger.LogInfo($"Pet visibility applied from native menu: {val}");
-                },
-                () => Cfg.ModEnabled.Value,
-                "Enable Cosmetic Pet",
-                "Toggles the visibility of your wiggling cosmetic companion."
-            );
-        }
 
         private bool IsModSettingsInstalled()
         {
@@ -178,6 +148,19 @@ namespace CosmeticPetMod
                 int selectedImageIndex = pngFiles.IndexOf(Cfg.SelectedPetImage.Value);
                 if (selectedImageIndex < 0) selectedImageIndex = 0;
 
+                var audioPacks = new System.Collections.Generic.List<string>();
+                audioPacks.Add("None");
+                if (Directory.Exists(AudioPacksDirectory))
+                {
+                    foreach (var dir in Directory.GetDirectories(AudioPacksDirectory))
+                    {
+                        audioPacks.Add(Path.GetFileName(dir));
+                    }
+                }
+
+                int selectedAudioPackIndex = audioPacks.IndexOf(Cfg.SelectedAudioPack.Value);
+                if (selectedAudioPackIndex < 0) selectedAudioPackIndex = 0;
+
                 var settingsList = new System.Collections.Generic.List<Setting>
                 {
                     new SettingBool
@@ -189,6 +172,19 @@ namespace CosmeticPetMod
                             if (s != null)
                             {
                                 Cfg.ModEnabled.Value = s.value;
+                                Instance.Config.Save();
+                            }
+                        }
+                    },
+                    new SettingBool
+                    {
+                        name = "cosmeticpet.simplemode",
+                        value = Cfg.SimpleMode.Value,
+                        apply = () => {
+                            var s = Settings.Get<SettingBool>("cosmeticpet.simplemode");
+                            if (s != null)
+                            {
+                                Cfg.SimpleMode.Value = s.value;
                                 Instance.Config.Save();
                             }
                         }
@@ -231,6 +227,21 @@ namespace CosmeticPetMod
                                 Cfg.SelectedPetImage.Value = pngFiles[s.value];
                                 Instance.Config.Save();
                                 PetController.Instance.LoadConfiguredPet();
+                            }
+                        }
+                    },
+                    new SettingDropdown
+                    {
+                        name = "cosmeticpet.selectedaudiopack",
+                        choices = audioPacks.ToArray(),
+                        value = selectedAudioPackIndex,
+                        apply = () => {
+                            var s = Settings.Get<SettingDropdown>("cosmeticpet.selectedaudiopack");
+                            if (s != null && s.value >= 0 && s.value < audioPacks.Count)
+                            {
+                                Cfg.SelectedAudioPack.Value = audioPacks[s.value];
+                                Instance.Config.Save();
+                                PetController.Instance.LoadAudioPack();
                             }
                         }
                     },
@@ -345,6 +356,54 @@ namespace CosmeticPetMod
                                 Instance.Config.Save();
                             }
                         }
+                    },
+                    new SettingFloat
+                    {
+                        name = "cosmeticpet.audiovolume",
+                        value = Cfg.AudioVolume.Value,
+                        min = 0.0f,
+                        max = 5.0f,
+                        formatValue = (val) => $"{val * 100f:F0}%",
+                        apply = () => {
+                            var s = Settings.Get<SettingFloat>("cosmeticpet.audiovolume");
+                            if (s != null)
+                            {
+                                Cfg.AudioVolume.Value = s.value;
+                                Instance.Config.Save();
+                            }
+                        }
+                    },
+                    new SettingFloat
+                    {
+                        name = "cosmeticpet.audiomininterval",
+                        value = Cfg.AudioMinInterval.Value,
+                        min = 1.0f,
+                        max = 120.0f,
+                        formatValue = (val) => $"{val:F1}s",
+                        apply = () => {
+                            var s = Settings.Get<SettingFloat>("cosmeticpet.audiomininterval");
+                            if (s != null)
+                            {
+                                Cfg.AudioMinInterval.Value = s.value;
+                                Instance.Config.Save();
+                            }
+                        }
+                    },
+                    new SettingFloat
+                    {
+                        name = "cosmeticpet.audiomaxinterval",
+                        value = Cfg.AudioMaxInterval.Value,
+                        min = 1.0f,
+                        max = 120.0f,
+                        formatValue = (val) => $"{val:F1}s",
+                        apply = () => {
+                            var s = Settings.Get<SettingFloat>("cosmeticpet.audiomaxinterval");
+                            if (s != null)
+                            {
+                                Cfg.AudioMaxInterval.Value = s.value;
+                                Instance.Config.Save();
+                            }
+                        }
                     }
                 };
 
@@ -361,6 +420,8 @@ namespace CosmeticPetMod
         {
             _harmony?.UnpatchSelf();
         }
+
+
     }
 
     [HarmonyPatch(typeof(Locale), nameof(Locale.LoadLanguage))]
@@ -410,6 +471,18 @@ namespace CosmeticPetMod
                 other["gamesetcosmeticpet.maxgrounddistance"] = "Max Ground Snapping Distance";
                 other["gamesetcosmeticpet.maxgrounddistancesc"] = "The maximum vertical distance below you that your pet companion will try to stick to the ground.";
 
+                other["gamesetcosmeticpet.selectedaudiopack"] = "Pet Audio Pack";
+                other["gamesetcosmeticpet.selectedaudiopacksc"] = "Select the audio pack that the pet plays sounds from.";
+
+                other["gamesetcosmeticpet.audiovolume"] = "Pet Audio Volume";
+                other["gamesetcosmeticpet.audiovolumesc"] = "How loud the pet plays its sounds/voice.";
+
+                other["gamesetcosmeticpet.audiomininterval"] = "Min Audio Interval";
+                other["gamesetcosmeticpet.audiominintervalsc"] = "Minimum time in seconds between random pet sounds.";
+
+                other["gamesetcosmeticpet.audiomaxinterval"] = "Max Audio Interval";
+                other["gamesetcosmeticpet.audiomaxintervalsc"] = "Maximum time in seconds between random pet sounds.";
+
                 // Also populate translations for dropdown choices dynamically!
                 if (Directory.Exists(Plugin.PetsDirectory))
                 {
@@ -417,6 +490,16 @@ namespace CosmeticPetMod
                     {
                         string name = Path.GetFileName(file);
                         other["gamesetcosmeticpet.selectedimage" + name] = name;
+                    }
+                }
+
+                if (Directory.Exists(Plugin.AudioPacksDirectory))
+                {
+                    other["gamesetcosmeticpet.selectedaudiopackNone"] = "None";
+                    foreach (var dir in Directory.GetDirectories(Plugin.AudioPacksDirectory))
+                    {
+                        string name = Path.GetFileName(dir);
+                        other["gamesetcosmeticpet.selectedaudiopack" + name] = name;
                     }
                 }
             }

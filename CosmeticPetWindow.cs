@@ -19,6 +19,7 @@ namespace CosmeticPetMod
         private string _importMessage = "";
         private bool _importSuccess = true;
         private Vector2 _scrollPos;
+        private Vector2 _audioScrollPos;
 
         protected override void DrawContent()
         {
@@ -30,6 +31,12 @@ namespace CosmeticPetMod
             if (enabled != Plugin.Cfg.ModEnabled.Value)
             {
                 Plugin.Cfg.ModEnabled.Value = enabled;
+            }
+
+            bool simpleMode = GUILayout.Toggle(Plugin.Cfg.SimpleMode.Value, " Simple Mode (No Collision)");
+            if (simpleMode != Plugin.Cfg.SimpleMode.Value)
+            {
+                Plugin.Cfg.SimpleMode.Value = simpleMode;
             }
 
             GUILayout.Space(10f);
@@ -88,6 +95,59 @@ namespace CosmeticPetMod
             GUILayout.Label($"Squish Smoothing Speed: {Plugin.Cfg.SquishSmoothing.Value:F1}");
             float sSmoothing = GUILayout.HorizontalSlider(Plugin.Cfg.SquishSmoothing.Value, 0.5f, 30.0f);
             if (sSmoothing != Plugin.Cfg.SquishSmoothing.Value) Plugin.Cfg.SquishSmoothing.Value = sSmoothing;
+
+            GUILayout.Space(10f);
+            GUILayout.Box("", GUILayout.ExpandWidth(true), GUILayout.Height(1f));
+            GUILayout.Space(5f);
+
+            GUILayout.Label("Pet Audio Settings", "BoldLabel");
+            GUILayout.Space(5f);
+
+            // Volume
+            GUILayout.Label($"Audio Volume: {Plugin.Cfg.AudioVolume.Value * 100f:F0}%");
+            float aVolume = GUILayout.HorizontalSlider(Plugin.Cfg.AudioVolume.Value, 0.0f, 5.0f);
+            if (aVolume != Plugin.Cfg.AudioVolume.Value) Plugin.Cfg.AudioVolume.Value = aVolume;
+
+            // Min Interval
+            GUILayout.Label($"Min Sound Interval: {Plugin.Cfg.AudioMinInterval.Value:F1} seconds");
+            float aMin = GUILayout.HorizontalSlider(Plugin.Cfg.AudioMinInterval.Value, 1.0f, 120.0f);
+            if (aMin != Plugin.Cfg.AudioMinInterval.Value) Plugin.Cfg.AudioMinInterval.Value = aMin;
+
+            // Max Interval
+            GUILayout.Label($"Max Sound Interval: {Plugin.Cfg.AudioMaxInterval.Value:F1} seconds");
+            float aMax = GUILayout.HorizontalSlider(Plugin.Cfg.AudioMaxInterval.Value, 1.0f, 120.0f);
+            if (aMax != Plugin.Cfg.AudioMaxInterval.Value) Plugin.Cfg.AudioMaxInterval.Value = aMax;
+
+            // List of audio packs
+            string audioDir = Plugin.AudioPacksDirectory;
+            GUILayout.Label("Audio Packs Folder: " + audioDir, "MiniLabel");
+            
+            var packs = new System.Collections.Generic.List<string>();
+            packs.Add("None");
+            if (Directory.Exists(audioDir))
+            {
+                foreach (var dir in Directory.GetDirectories(audioDir))
+                {
+                    packs.Add(Path.GetFileName(dir));
+                }
+            }
+
+            GUILayout.Label("Select Audio Pack:", "BoldLabel");
+            _audioScrollPos = GUILayout.BeginScrollView(_audioScrollPos, GUILayout.Height(100f));
+            foreach (string pack in packs)
+            {
+                bool isSelected = Plugin.Cfg.SelectedAudioPack.Value == pack;
+                if (GUILayout.Toggle(isSelected, " " + pack, "Button"))
+                {
+                    if (!isSelected)
+                    {
+                        Plugin.Cfg.SelectedAudioPack.Value = pack;
+                        Plugin.Instance.Config.Save();
+                        PetController.Instance?.LoadAudioPack();
+                    }
+                }
+            }
+            GUILayout.EndScrollView();
 
             GUILayout.Space(10f);
             GUILayout.Box("", GUILayout.ExpandWidth(true), GUILayout.Height(1f));

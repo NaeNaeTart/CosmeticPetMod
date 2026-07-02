@@ -30,9 +30,7 @@
     </Reference>
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\ScavSetLib\ScavSetLib.csproj" />
-  </ItemGroup>
+
 
   <!-- ─────────── Unity Engine references ─────────── -->
   <ItemGroup>
@@ -115,6 +113,10 @@
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestTextureModule">
       <HintPath>..\..\..\..\CasualtiesUnknown_Data\Managed\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule">
+      <HintPath>..\..\..\..\CasualtiesUnknown_Data\Managed\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- Native Mod Settings -->

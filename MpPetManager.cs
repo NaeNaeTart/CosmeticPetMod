@@ -50,6 +50,13 @@ namespace CosmeticPetMod
             public float YVelocity;
             public float DirectionLockTimer;
             public bool LastPendingFacingRight = true;
+
+            // Audio settings synchronized from lobby member data
+            public string AudioPackName = "None";
+            public float AudioVolume = 1.0f;
+            public AudioSource? AudioSource;
+            public List<AudioClip> AudioClips = new List<AudioClip>();
+            public string LoadedAudioPackName = "";
         }
 
         private static readonly Dictionary<Body, RemotePetInstance> _remotePets = new Dictionary<Body, RemotePetInstance>();
@@ -172,6 +179,10 @@ namespace CosmeticPetMod
                     SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_bobbing_amplitude", Plugin.Cfg.BobbingAmplitude.Value.ToString(CultureInfo.InvariantCulture));
                     SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_bobbing_speed", Plugin.Cfg.BobbingSpeed.Value.ToString(CultureInfo.InvariantCulture));
                     SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_squish_smoothing", Plugin.Cfg.SquishSmoothing.Value.ToString(CultureInfo.InvariantCulture));
+
+                    // Publish audio settings
+                    SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_audiopack", Plugin.Cfg.SelectedAudioPack.Value);
+                    SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_audiovolume", Plugin.Cfg.AudioVolume.Value.ToString(CultureInfo.InvariantCulture));
                 }
                 catch (Exception ex)
                 {
@@ -717,10 +728,93 @@ namespace CosmeticPetMod
                     {
                         pet.SquishSmoothing = sSmoothing;
                     }
+
+                    // Sync audio settings
+                    string audioPackStr = SteamMatchmaking.GetLobbyMemberData(lobbyId, memberId, "cosmetic_pet_audiopack");
+                    if (!string.IsNullOrEmpty(audioPackStr) && audioPackStr != pet.AudioPackName)
+                    {
+                        pet.AudioPackName = audioPackStr;
+                        LoadRemoteAudioPack(pet);
+                    }
+
+                    string audioVolStr = SteamMatchmaking.GetLobbyMemberData(lobbyId, memberId, "cosmetic_pet_audiovolume");
+                    if (float.TryParse(audioVolStr, NumberStyles.Float, CultureInfo.InvariantCulture, out float audioVol))
+                    {
+                        pet.AudioVolume = audioVol;
+                    }
                 }
                 catch (Exception ex)
                 {
                     Plugin.Logger.LogWarning($"Error fetching Steam lobby member pet data: {ex.Message}");
+                }
+            }
+        }
+
+        private static void LoadRemoteAudioPack(RemotePetInstance pet)
+        {
+            if (pet.PetVisuals == null) return;
+
+            // Ensure the remote pet GameObject has an AudioSource
+            if (pet.AudioSource == null)
+            {
+                pet.AudioSource = pet.PetVisuals.AddComponent<AudioSource>();
+                pet.AudioSource.spatialBlend = 1.0f; // 3D positional audio
+                pet.AudioSource.minDistance = 2f;
+                pet.AudioSource.maxDistance = 25f;
+                pet.AudioSource.rolloffMode = AudioRolloffMode.Logarithmic;
+            }
+
+            pet.AudioClips.Clear();
+
+            if (string.IsNullOrEmpty(pet.AudioPackName) || pet.AudioPackName == "None")
+            {
+                pet.LoadedAudioPackName = "None";
+                return;
+            }
+
+            string packPath = Path.Combine(Plugin.AudioPacksDirectory, pet.AudioPackName);
+            if (!Directory.Exists(packPath))
+            {
+                Plugin.Logger.LogInfo($"Remote pet audio pack not found locally, skipping: {packPath}");
+                pet.LoadedAudioPackName = pet.AudioPackName; // mark as attempted
+                return;
+            }
+
+            pet.LoadedAudioPackName = pet.AudioPackName;
+            Plugin.Logger.LogInfo($"Loading remote audio pack '{pet.AudioPackName}' for player {pet.PlayerName}");
+
+            string[] audioFiles = Directory.GetFiles(packPath, "*.*", SearchOption.AllDirectories);
+            foreach (string file in audioFiles)
+            {
+                string ext = Path.GetExtension(file).ToLowerInvariant();
+                AudioType type;
+                if (ext == ".wav") type = AudioType.WAV;
+                else if (ext == ".ogg") type = AudioType.OGGVORBIS;
+                else if (ext == ".mp3") type = AudioType.MPEG;
+                else continue;
+
+                PetController.Instance.StartCoroutine(LoadRemoteAudioClip(file, type, pet));
+            }
+        }
+
+        private static IEnumerator LoadRemoteAudioClip(string filePath, AudioType type, RemotePetInstance pet)
+        {
+            string url = "file://" + filePath.Replace("\\", "/");
+            using (var uwr = UnityWebRequestMultimedia.GetAudioClip(url, type))
+            {
+                yield return uwr.SendWebRequest();
+                if (uwr.result == UnityWebRequest.Result.Success)
+                {
+                    AudioClip clip = DownloadHandlerAudioClip.GetContent(uwr);
+                    if (clip != null)
+                    {
+                        pet.AudioClips.Add(clip);
+                        Plugin.Logger.LogInfo($"Loaded remote audio clip: {clip.name} for {pet.PlayerName}");
+                    }
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning($"Failed to load remote audio clip from {filePath}: {uwr.error}");
                 }
             }
         }
@@ -922,8 +1016,90 @@ namespace CosmeticPetMod
                         // Response: remote player sent us their custom image
                         HandleP2PResponse(packet);
                     }
+                    else if (packetType == 2)
+                    {
+                        // Audio event: remote player's pet played a sound
+                        HandleRemoteAudioEvent(remoteUser, packet);
+                    }
                 }
             }
+        }
+
+        public static void BroadcastAudioEvent(int clipIndex, float volume)
+        {
+            if (!KSteam.IS_IN_LOBBY) return;
+            if (clipIndex < 0 || clipIndex > 255) return;
+
+            try
+            {
+                byte[] packet = new byte[6];
+                packet[0] = 2; // Type 2: Audio event
+                packet[1] = (byte)clipIndex;
+                Buffer.BlockCopy(BitConverter.GetBytes(volume), 0, packet, 2, 4);
+
+                foreach (ulong memberId in GetLobbyMemberSteamIds())
+                {
+                    SteamNetworking.SendP2PPacket(
+                        new CSteamID(memberId), packet, (uint)packet.Length,
+                        EP2PSend.k_EP2PSendUnreliable, 1337);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"Error broadcasting audio event: {ex.Message}");
+            }
+        }
+
+        private static void HandleRemoteAudioEvent(CSteamID remoteUser, byte[] packet)
+        {
+            if (packet.Length < 6) return;
+
+            try
+            {
+                int clipIndex = packet[1];
+                float volume = BitConverter.ToSingle(packet, 2);
+
+                // Find the remote pet owned by this Steam user
+                foreach (var pet in _remotePets.Values)
+                {
+                    if (pet.SteamId != remoteUser.m_SteamID) continue;
+                    if (pet.AudioSource == null || pet.AudioClips.Count == 0) return;
+
+                    int idx = clipIndex % pet.AudioClips.Count;
+                    AudioClip clip = pet.AudioClips[idx];
+                    if (clip != null)
+                    {
+                        pet.AudioSource.PlayOneShot(clip, volume);
+                    }
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"Error handling remote audio event: {ex.Message}");
+            }
+        }
+
+        private static IEnumerable<ulong> GetLobbyMemberSteamIds()
+        {
+            var ids = new List<ulong>();
+            try
+            {
+                CSteamID lobbyId = KSteam.lobbyId;
+                int memberCount = SteamMatchmaking.GetNumLobbyMembers(lobbyId);
+                ulong localId = SteamUser.GetSteamID().m_SteamID;
+                for (int i = 0; i < memberCount; i++)
+                {
+                    ulong memberId = SteamMatchmaking.GetLobbyMemberByIndex(lobbyId, i).m_SteamID;
+                    if (memberId != localId)
+                        ids.Add(memberId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"Error enumerating lobby members: {ex.Message}");
+            }
+            return ids;
         }
 
         private static void RequestPetSpriteOverP2P(ulong ownerSteamId, string hash)
