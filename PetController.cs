@@ -81,20 +81,29 @@ namespace CosmeticPetMod
         {
             if (_petVisuals == null || _spriteRenderer == null) return;
 
-            // Handle toggle visibility keybind
+            // Handle toggle visibility keybind — toggles ShowMyPet (your own pet visibility)
             if (Input.GetKeyDown(Plugin.Cfg.TogglePetKey.Value))
             {
-                Plugin.Cfg.ModEnabled.Value = !Plugin.Cfg.ModEnabled.Value;
-                Plugin.Logger.LogInfo($"Cosmetic Pet visibility toggled to: {Plugin.Cfg.ModEnabled.Value}");
+                Plugin.Cfg.ShowMyPet.Value = !Plugin.Cfg.ShowMyPet.Value;
+                Plugin.Instance.Config.Save();
+                MpPetManager.ForcePublishLocalPetSettings();
+                Plugin.Logger.LogInfo($"Cosmetic Pet visibility toggled to: {Plugin.Cfg.ShowMyPet.Value}");
             }
 
-            // Sync visual active state with ModEnabled config
-            if (_petVisuals.activeSelf != Plugin.Cfg.ModEnabled.Value)
+            // Master switch — if mod is disabled entirely, hide pet and stop
+            if (!Plugin.Cfg.ModEnabled.Value)
             {
-                _petVisuals.SetActive(Plugin.Cfg.ModEnabled.Value);
+                if (_petVisuals.activeSelf) _petVisuals.SetActive(false);
+                return;
             }
 
-            if (!Plugin.Cfg.ModEnabled.Value) return;
+            // Sync visual active state with ShowMyPet config
+            if (_petVisuals.activeSelf != Plugin.Cfg.ShowMyPet.Value)
+            {
+                _petVisuals.SetActive(Plugin.Cfg.ShowMyPet.Value);
+            }
+
+            if (!Plugin.Cfg.ShowMyPet.Value) return;
 
             // Handle audio playing
             if (_loadedAudioClips.Count > 0 && _audioSource != null)
@@ -128,9 +137,13 @@ namespace CosmeticPetMod
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
 
-            // 0. Two-tier anti-teleport guard
+            // 0. Two-tier anti-teleport guard (dynamic based on configured follow distance)
+            float followDist = Plugin.Cfg.FollowDistance.Value;
+            float hardSnapThreshold = Mathf.Max(18.0f, followDist + 10.0f);
+            float softResetThreshold = Mathf.Max(8.0f, followDist + 4.0f);
+
             float distToPlayer = Vector3.Distance(playerPos, _petVisuals.transform.position);
-            if (distToPlayer > 18.0f)
+            if (distToPlayer > hardSnapThreshold)
             {
                 // Hard snap for extreme distances (load screens, fast-travel)
                 _petVisuals.transform.position = playerPos;
@@ -139,7 +152,7 @@ namespace CosmeticPetMod
                 _smoothedGroundY = playerPos.y;
                 _lastSafePos = new Vector2(playerPos.x, playerPos.y);
             }
-            else if (distToPlayer > 8.0f)
+            else if (distToPlayer > softResetThreshold)
             {
                 // Soft reset: kill vertical momentum so SmoothDamp doesn't fling the pet across the screen
                 _yVelocity = 0f;
@@ -182,7 +195,6 @@ namespace CosmeticPetMod
             }
 
             // 2. Target follow horizontal position
-            float followDist = Plugin.Cfg.FollowDistance.Value;
             float targetX = playerPos.x + (_facingRight ? -followDist : followDist);
             
             // Framerate-independent exponential Lerp — snappy feel without SmoothDamp lag

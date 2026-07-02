@@ -82,6 +82,13 @@ namespace CosmeticPetMod
                 return;
             }
 
+            // 3. If the player has disabled seeing others' pets, clear and return
+            if (!Plugin.Cfg.ShowOthersPets.Value)
+            {
+                if (_remotePets.Count > 0) ClearRemotePets();
+                return;
+            }
+
             var allNetBodies = NetBody.all_instances;
             if (allNetBodies == null) return;
 
@@ -183,6 +190,10 @@ namespace CosmeticPetMod
                     // Publish audio settings
                     SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_audiopack", Plugin.Cfg.SelectedAudioPack.Value);
                     SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_audiovolume", Plugin.Cfg.AudioVolume.Value.ToString(CultureInfo.InvariantCulture));
+
+                    // Publish own pet visibility so others know whether to render it
+                    SteamMatchmaking.SetLobbyMemberData(lobbyId, "cosmetic_pet_visible",
+                        Plugin.Cfg.ShowMyPet.Value ? "true" : "false");
                 }
                 catch (Exception ex)
                 {
@@ -237,8 +248,10 @@ namespace CosmeticPetMod
 
             Vector3 ownerPos = pet.OwnerBody.transform.position;
 
-            // 0. Prevent teleportation lags and mountain clip-throughs
-            if (Vector3.Distance(ownerPos, pet.PetVisuals.transform.position) > 15.0f)
+            // 0. Prevent teleportation lags and mountain clip-throughs (dynamic based on synced follow distance)
+            float followDist = pet.FollowDistance;
+            float teleportThreshold = Mathf.Max(15.0f, followDist + 5.0f);
+            if (Vector3.Distance(ownerPos, pet.PetVisuals.transform.position) > teleportThreshold)
             {
                 pet.PetVisuals.transform.position = ownerPos;
             }
@@ -279,7 +292,6 @@ namespace CosmeticPetMod
             }
 
             // 4. Smooth horizontal movement (personalized follow distance & follow speed!)
-            float followDist = pet.FollowDistance;
             float targetX = ownerPos.x + (pet.FacingRight ? -followDist : followDist);
 
             float followSpeed = pet.FollowSpeed;
@@ -634,6 +646,21 @@ namespace CosmeticPetMod
                 {
                     CSteamID lobbyId = KSteam.lobbyId;
                     CSteamID memberId = new CSteamID(pet.SteamId);
+
+                    // Check whether the remote player has their pet hidden
+                    string visStr = SteamMatchmaking.GetLobbyMemberData(lobbyId, memberId, "cosmetic_pet_visible");
+                    if (visStr == "false")
+                    {
+                        // Destroy visuals if they exist and skip the rest of the update
+                        if (pet.PetVisuals != null)
+                        {
+                            UnityEngine.Object.Destroy(pet.PetVisuals);
+                            pet.PetVisuals = null;
+                            pet.SpriteRenderer = null;
+                            pet.AudioSource = null;
+                        }
+                        return;
+                    }
 
                     string image = SteamMatchmaking.GetLobbyMemberData(lobbyId, memberId, "cosmetic_pet_image");
                     string hash = SteamMatchmaking.GetLobbyMemberData(lobbyId, memberId, "cosmetic_pet_hash");

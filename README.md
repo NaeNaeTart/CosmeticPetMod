@@ -9,7 +9,7 @@ Welcome to the **Cosmetic Pet Mod**, a premium companion experience for *Casualt
 ### 1. 🦘 Physics-Based Follow Behavior
 - **Horizontal Lag**: Trails behind you at a configurable follow distance with smooth exponential interpolation — no rigid snapping.
 - **Auto-Flipping**: Detects your facing direction (or movement delta) with a 150ms hysteresis lock to prevent rapid flutter, always looking the correct way.
-- **Teleport Protection**: Two-tier guard — soft reset above 8 units, hard snap above 18 units — stops the pet from warping across the screen during fast movement.
+- **Teleport Protection**: Two-tier guard — soft reset and hard snap — dynamically scaled according to your follow distance configuration. Prevents infinite warp loops when selecting long distances.
 
 ### 2. 🌍 Auto-Leveling Ground System
 - **Multi-Raycast Sampling**: Three rays span the pet's left, center, and right edges to bridge 1-tile gaps and step smoothly over terrain.
@@ -80,6 +80,8 @@ The mod integrates into **CU_ModSettings** (native game settings menu) when inst
 |---------|-------------|
 | Enable Cosmetic Pet | Toggle the pet on/off |
 | Simple Mode | Bypass all collision/geometry checks (noclip) |
+| Show My Pet | Show your own pet to yourself and others |
+| Show Others' Pets | Show other players' pets on your screen |
 | Pet Scale | Visual size multiplier |
 | Follow Speed | How fast the pet catches up to you |
 | Follow Distance | Ideal horizontal gap behind you |
@@ -97,17 +99,12 @@ The mod integrates into **CU_ModSettings** (native game settings menu) when inst
 | Toggle Key | Keybind for hiding/showing pet |
 | Toggle Menu Key | Keybind for opening the settings window |
 
-### 📥 Importing Custom Sprites
-**Method A — Drop files:**  
-Place `.png` files into `BepInEx/plugins/CosmeticPetMod/Pets/` and they appear in the settings list immediately.
+### 📥 Importing Custom Sprites & Audio Packs
+To make custom additions effortless, the in-game menu (`O`) provides native Windows file pickers that run on background STA threads to keep the gameplay smooth:
 
-**Method B — In-game importer:**  
-Paste a full file path or direct image URL into the settings window and click **Import Image File / URL**. The mod downloads, caches, and applies it mid-session.
-
-### 🎵 Installing Audio Packs
-Create a folder inside `BepInEx/plugins/CosmeticPetMod/AudioPacks/<pack_name>/` and place `.wav`, `.ogg`, or `.mp3` files inside. Select the pack in settings — the pet will play sounds randomly on its configured interval.
-
-> **Note**: The mod no longer auto-creates these folders or generates placeholder files on startup. Create them manually when you want to add content.
+1. **📁 Browse PNG File**: Click this in the **General** tab to pick any `.png` image from your computer. The mod automatically copies it to `Pets/` and selects it instantly.
+2. **📁 Import Audio Pack ZIP**: Click this in the **Audio** tab to select a `.zip` archive containing your audio clips. The mod extracts the files directly into a new subdirectory in `AudioPacks/` and activates it.
+3. **Manual Import / URL**: Drag and drop files directly into `Pets/` or `AudioPacks/`, or paste direct URLs inside the text field to download and load them mid-session.
 
 ---
 
@@ -126,22 +123,28 @@ Create a folder inside `BepInEx/plugins/CosmeticPetMod/AudioPacks/<pack_name>/` 
 - **[Plugin.cs](Plugin.cs)**: BepInEx entry point — registers with ScavLib, applies Harmony patches, sets up settings integrations.
 - **[ModConfig.cs](ModConfig.cs)**: All BepInEx persistent config entries.
 - **[PetController.cs](PetController.cs)**: Local pet physics, raycasting, collision, animation, audio playback, simple mode.
-- **[MpPetManager.cs](MpPetManager.cs)**: Steam P2P skin transfer, lobby metadata sync, remote pet rendering, audio sync.
-- **[CosmeticPetWindow.cs](CosmeticPetWindow.cs)**: Standalone ImGui settings window with sliders, dropdowns, and image importer.
+- **[MpPetManager.cs](MpPetManager.cs)**: Steam P2P skin transfer, lobby metadata sync, remote pet rendering, audio sync, visibility sync.
+- **[CosmeticPetWindow.cs](CosmeticPetWindow.cs)**: Standalone ImGui settings window with tabs, file picker threads, and image importer.
 
 ---
 
 ## 📋 Changelog
 
+### v1.2.0
+- **Native File Browser Pickers**: Added STA-threaded open file dialogs to import PNG sprites and audio pack ZIP archives directly from your filesystem.
+- **Compact Tabbed UI**: Reorganized settings into 4 tidy tabs: General, Movement, Physics, and Audio.
+- **Independent Visibility Toggles**: Added separate settings `ShowMyPet` (broadcasted to peers) and `ShowOthersPets` (local render filter).
+- **Dynamic Teleportation Thresholds**: Fixed infinite teleport looping at large follow distances.
+
 ### v1.1.0
-- **Simple Mode**: Bypass all collision checks with smooth noclip hover follow
-- **Improved Ground Snapping**: Threshold-gated rate limiter eliminates flat-ground stickiness; two-tier teleport protection prevents wild snapping
-- **Overhauled Ceiling Squishing**: Early lookahead pre-pass, accurate bottom-edge clearance, asymmetric compression (2.5× faster), minimum cap `0.15×`, ceiling-aware wall rays
-- **Item Ignore**: Pet no longer snaps to or collides with physical dropped items
-- **500% Audio Volume**: `PlayOneShot` overload bypasses Unity's `1.0` clamp; sliders updated to `5.0` (500%)
-- **Multiplayer Audio Sync**: Pet sounds broadcast via 6-byte P2P unreliable packet (type 2); remote pets play sounds positioned in 3D space
-- **Removed ScavSetLib Dependency**: No longer requires `ScavSetLib.dll`; native settings fully handled by `CU_ModSettings`
-- **No Auto-Created Folders**: `Pets/` and `AudioPacks/` directories are no longer created automatically on startup
+- **Simple Mode**: Bypass all collision checks with smooth noclip hover follow.
+- **Improved Ground Snapping**: Threshold-gated rate limiter; two-tier teleport protection.
+- **Overhauled Ceiling Squishing**: Early lookahead pre-pass, accurate clearance, asymmetric compression (2.5× faster), cap `0.15×`, ceiling-aware wall rays.
+- **Item Ignore**: Pet no longer snaps to or collides with physical dropped items.
+- **500% Audio Volume**: `PlayOneShot` overload bypasses Unity's `1.0` clamp; sliders updated to `5.0`.
+- **Multiplayer Audio Sync**: Pet sounds broadcast via 6-byte P2P unreliable packet (type 2).
+- **Removed ScavSetLib Dependency**: Native settings fully handled by `CU_ModSettings`.
+- **No Auto-Created Folders**: `Pets/` and `AudioPacks/` directories are no longer created automatically on startup.
 
 ### v1.0.0
-- Initial release: physics follow, multi-raycast ground leveling, ceiling squish, walking wiggle, multiplayer skin sync via P2P, CU_ModSettings and ScavLib integration
+- Initial release: physics follow, ground leveling, ceiling squish, walking wiggle, multiplayer skin sync, settings and UI.

@@ -189,6 +189,33 @@ namespace CosmeticPetMod
                             }
                         }
                     },
+                    new SettingBool
+                    {
+                        name = "cosmeticpet.showmypet",
+                        value = Cfg.ShowMyPet.Value,
+                        apply = () => {
+                            var s = Settings.Get<SettingBool>("cosmeticpet.showmypet");
+                            if (s != null)
+                            {
+                                Cfg.ShowMyPet.Value = s.value;
+                                Instance.Config.Save();
+                                MpPetManager.ForcePublishLocalPetSettings();
+                            }
+                        }
+                    },
+                    new SettingBool
+                    {
+                        name = "cosmeticpet.showotherspets",
+                        value = Cfg.ShowOthersPets.Value,
+                        apply = () => {
+                            var s = Settings.Get<SettingBool>("cosmeticpet.showotherspets");
+                            if (s != null)
+                            {
+                                Cfg.ShowOthersPets.Value = s.value;
+                                Instance.Config.Save();
+                            }
+                        }
+                    },
                     new SettingKeybind
                     {
                         name = "cosmeticpet.togglekey",
@@ -440,6 +467,12 @@ namespace CosmeticPetMod
 
                 other["gamesetcosmeticpet.enabled"] = "Enable Mod";
                 other["gamesetcosmeticpet.enabledsc"] = "Whether the cosmetic pet companion should be visible and follow you.";
+
+                other["gamesetcosmeticpet.showmypet"] = "Show My Pet";
+                other["gamesetcosmeticpet.showmypetsc"] = "Whether your pet is visible to yourself and broadcast to other players.";
+
+                other["gamesetcosmeticpet.showotherspets"] = "Show Others' Pets";
+                other["gamesetcosmeticpet.showotherspetssc"] = "Whether you see other players' cosmetic pets on your screen.";
 
                 other["gamesetcosmeticpet.togglekey"] = "Toggle Visibility Key";
                 other["gamesetcosmeticpet.togglekeysc"] = "Keyboard shortcut to quickly show or hide your pet companion.";

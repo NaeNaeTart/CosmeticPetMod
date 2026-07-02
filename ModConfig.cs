@@ -7,6 +7,8 @@ namespace CosmeticPetMod
     {
         public ConfigEntry<bool> ModEnabled { get; }
         public ConfigEntry<bool> SimpleMode { get; }
+        public ConfigEntry<bool> ShowMyPet { get; }
+        public ConfigEntry<bool> ShowOthersPets { get; }
         public ConfigEntry<KeyCode> TogglePetKey { get; }
         public ConfigEntry<KeyCode> ToggleMenuKey { get; }
         public ConfigEntry<string> SelectedPetImage { get; }
@@ -27,8 +29,10 @@ namespace CosmeticPetMod
 
         public ModConfig(ConfigFile config)
         {
-            ModEnabled = config.Bind("General", "ModEnabled", true, "Enable or disable the cosmetic pet mod.");
+            ModEnabled = config.Bind("General", "ModEnabled", true, "Master switch — enable or disable the entire cosmetic pet mod.");
             SimpleMode = config.Bind("General", "SimpleMode", false, "If enabled, the pet ignores all geometry/collision checks and hovers/wiggles directly next to the player.");
+            ShowMyPet = config.Bind("General", "ShowMyPet", true, "Show your own pet to yourself and broadcast it to other players.");
+            ShowOthersPets = config.Bind("General", "ShowOthersPets", true, "Show other players' pets on your screen.");
             TogglePetKey = config.Bind("General", "TogglePetKey", KeyCode.P, "The keybind to toggle the pet visibility on or off.");
             ToggleMenuKey = config.Bind("General", "ToggleMenuKey", KeyCode.O, "The keybind to open the cosmetic pet settings menu.");
             SelectedPetImage = config.Bind("General", "SelectedPetImage", "default_slime.png", "The filename of the currently selected pet image from the Pets folder.");
